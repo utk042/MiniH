@@ -18,28 +18,38 @@ It finds three things, in this order:
 
 ## Status
 
-**Step 1 of 5 is complete: schema, RLS, matching functions and seed data,
-verified against a real Postgres 16 cluster.** 105 assertions across five test
-files. Nothing below is a mock — every function and policy described here runs.
+**Steps 1 and 2 of 5 are complete.** Step 1: schema, RLS, matching functions and
+seed data. Step 2: the canonicalization pipeline — Gemini, cache, Zod, and a
+rules-based fallback. Nothing below is a mock; every function, policy and
+prompt described here runs.
 
-Still to build, in order: the canonicalization pipeline (Gemini + cache + Zod),
-the UI, then realtime and messaging. The 60-second demo script belongs with the
-UI and is not written yet; there is no interface to click through.
-
-```
-npm run db:verify
-```
+Still to build, in order: the UI, then realtime and messaging. The 60-second
+demo script belongs with the UI and is not written yet — there is no interface
+to click through.
 
 ```
-7. tests
+npm run verify        # typecheck, then the TypeScript tests, then the database
+```
+
+```
+# tests 121
+# pass 121
+
    pass  01_campus_domain_and_signup.sql  (14 assertions)
    pass  02_rls.sql  (32 assertions)
    pass  03_cycles.sql  (30 assertions)
    pass  04_cash_fallback_and_pricing.sql  (17 assertions)
    pass  05_new_listing_creates_a_match.sql  (12 assertions)
+   pass  06_catalogue_resolution.sql  (22 assertions)
+   pass  key derivation matches in both languages  (100 assertions)
 ```
 
----
+**One thing these numbers do not cover:** no call has been made to the real
+Gemini API. There is no key in this environment. The tests drive the pipeline
+through an injected transport, which exercises our validation, derivation,
+caching and fallback but says nothing about how well the model itself resolves
+"orgo 3rd ed morrison boyd". `npm run canon` is the script that answers that,
+and it needs `GEMINI_API_KEY`.
 
 ## Running the verification
 
@@ -152,6 +162,117 @@ tested.
 
 ---
 
+## Canonicalization
+
+Free text in, one canonical record out:
+
+```
+  normalise + hash the input
+        |
+  cache hit? ──yes──> return, zero API calls
+        | no
+  Gemini: extract {title, authors, edition, subject_tags, condition, isbn}
+        |
+  Zod ──fails──> rules-based fallback (deterministic, always available)
+        |
+  derive canonical_key IN CODE from {authors, title, edition}
+        |
+  resolve against the catalogue — does this book already have a node?
+        |
+  write the cache
+```
+
+### Where the model is, and is not
+
+Gemini does three narrow jobs: it reads free text into structured fields, it
+picks tags, and it writes two sentences of description. It does not rank
+matches, set prices, search for cycles, or write messages — those are
+deterministic SQL and TypeScript, in `20260814000500_matching.sql` and
+`suggest_price_cents()`.
+
+It also does not decide a `canonical_key`. The model is asked for one, and the
+answer is used only as a cross-check: the key that gets written is always the
+one `deriveKeys()` computes from `{authors, title, edition}`. A model that is
+right 99% of the time still fragments the graph 1% of the time, and a fragmented
+graph finds no cycles. When the two disagree, the derived key wins and the
+disagreement is surfaced as a warning next to the "resolved by AI" affordance.
+
+The model id lives in exactly one place, `lib/ai/model.ts`:
+
+```ts
+export const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+```
+
+Calls set `responseMimeType: 'application/json'` with a `responseSchema`, and
+`temperature: 0` — this is extraction, so the same listing must resolve the same
+way twice. There is still a fence-stripping parser behind that, because a stray
+```` ```json ```` is the most common way structured output fails and falling
+back over a pair of backticks would be silly.
+
+### Deterministic keys, and the catalogue that overrides them
+
+`canonical_key` is derived by rule: author surnames, then title, then edition.
+One author gives one surname, two give both, three or more give the first only —
+so `morrison-boyd-organic-chemistry-3`, and `cormen-introduction-to-algorithms-4`
+rather than a key naming all four of CLRS.
+
+Derivation alone is not enough. The campus catalogue calls one book
+`campbell-biology-12`; no rule reading `{Urry, Cain, Wasserman}` will ever
+produce that. So before minting a key, `resolve_book()` looks for the book
+already in the catalogue — by ISBN, or by title plus edition plus a shared
+author surname. Five of the ten test listings derive straight to the seeded key;
+the other five only land on the right node because of this lookup.
+
+Resolution is deliberately conservative. A false match merges two different
+books permanently; a missed match only leaves a duplicate someone can merge
+later. "Organic Chemistry" by Morrison and "Organic Chemistry" by McMurry stay
+apart, and there is a test for it.
+
+**The two implementations must agree.** `canonicalize()` computes `title_key` in
+TypeScript and hands it to `resolve_book()`, which compares it against a column
+generated in SQL. If they ever disagree — on an accent, a leading article,
+punctuation — nothing errors. Resolution silently stops matching, every listing
+mints a fresh node, and the graph quietly stops finding cycles. So
+`scripts/db/parity.ts` runs both implementations over the same 100 awkward
+inputs and asserts they agree, as part of `npm run db:verify`. It has already
+caught two real divergences: `lower()` not folding `Æ` under a C locale, and
+Postgres resolving mixed greedy/non-greedy quantifiers differently from
+JavaScript on "Ludwig van Beethoven".
+
+### Cost discipline
+
+| Measure | Effect |
+| --- | --- |
+| Cache keyed by hash of the normalised input | The same string twice costs nothing. Case, spacing and curly quotes normalise away first, so near-misses hit too. |
+| Tags and description in one call | Not two. There is a test asserting the call count. |
+| In-process single-flight | Two people pasting the same string at the same moment is one call. |
+| Human corrections written back | A correction is cached under the same hash and marked `human`, so it is free forever after, and a trigger stops automated output from overwriting it. |
+
+### When it goes wrong
+
+Nothing in the flow throws because an API did. Unparseable output, a failed Zod
+check, a timeout, a missing key — all land on `canonicalizeByRules()`, which
+expands the shorthand it knows, reads the edition and condition out of the text,
+and mints a title-only key. It is worse than the model and says so: every record
+it produces carries warnings, including that no author was identified.
+
+The tag and description validators are house rules, not just shapes. A
+description is rejected for a third sentence, an exclamation mark, an emoji,
+addressing the reader, or any of two dozen marketing phrases — "elevate",
+"perfect for", "must-have". A rejected description is replaced by the
+deterministic one rather than retried, because a retry costs another call to fix
+a prompt problem.
+
+### Trying it
+
+```
+GEMINI_API_KEY=... npm run canon -- "orgo 3rd ed morrison boyd, spine cracked"
+GEMINI_API_KEY=... npm run canon          # all ten fixture listings
+npm run canon                             # no key: everything takes the rules path
+```
+
+---
+
 ## Security
 
 Every table has RLS enabled, scoped `to authenticated`. The shape:
@@ -218,6 +339,22 @@ staged.
 ## Layout
 
 ```
+lib/
+  ai/
+    model.ts                                   GEMINI_MODEL and the call limits
+    gemini.ts                                  the transport, behind an injectable seam
+  canonicalize/
+    canonicalize.ts                            the orchestrator
+    enrich.ts                                  tags + description, one call
+    fallback.ts                                the rules-based path
+    normalize.ts                               normalisation and hashing
+    override.ts                                a student correcting the model
+    ports.ts                                   cache and catalogue interfaces
+    prompts.ts                                 both prompts
+    schema.ts                                  Zod + responseSchema
+    slug.ts                                    key derivation. deterministic, no model
+    supabase-repos.ts                          the two ports, against Supabase
+  tags/vocabulary.ts                           the controlled tag list
 supabase/
   migrations/
     20260814000100_config_and_types.sql        app_config, enums, slugify, condition_score
@@ -226,19 +363,29 @@ supabase/
     20260814000400_rls.sql                     policies + column-level guards
     20260814000500_matching.sql                edges, cycle search, pricing, materialization
     20260814000600_storage_and_realtime.sql    photo bucket, publication
+    20260814000700_catalogue_resolution.sql    resolve_book, title_key, tag vocabulary
   seed.sql
   config.toml
   local/00_auth_shim.sql                       local verification only
-  tests/                                       _helpers.sql + five test files
-scripts/db/
-  verify.sh                                    build a cluster, apply, test, tear down
-  push.sh                                      apply to a real database
+  tests/                                       _helpers.sql + six test files
+scripts/
+  canon.ts                                     run the pipeline against the real API
+  db/verify.sh                                 build a cluster, apply, test, tear down
+  db/parity.ts                                 assert TypeScript and SQL derive the same keys
+  db/push.sh                                   apply to a real database
+tests/                                         121 TypeScript tests
+  fixtures/messy-inputs.ts                     the ten listings, and a fake catalogue
 ```
 
 ---
 
 ## Environment
 
-Every variable is in `.env.example`. The ones that exist today are the Supabase
-connection details, `GEMINI_API_KEY` (unused until step 2), and
-`NEXT_PUBLIC_CAMPUS_EMAIL_DOMAIN`, which must match the value in `app_config`.
+Every variable is in `.env.example`. `GEMINI_API_KEY` is read in exactly one
+place, `lib/ai/gemini.ts`, which is server-only and must never be imported from
+a client component. `NEXT_PUBLIC_CAMPUS_EMAIL_DOMAIN` must match the value in
+`app_config`, where the trigger reads it from.
+
+The pipeline runs under the signed-in student's own Supabase session, not the
+service role: `cache_canonicalization` and `books` are insertable by
+`authenticated` on purpose, so canonicalization needs no elevated key at all.

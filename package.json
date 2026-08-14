@@ -4,11 +4,26 @@
   "private": true,
   "description": "Demand-first, swap-first peer-to-peer textbook exchange for a single campus.",
   "scripts": {
+    "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "canon": "node --import tsx scripts/canon.ts",
     "db:verify": "bash scripts/db/verify.sh",
     "db:verify:keep": "BACKSTACK_KEEP_CLUSTER=1 bash scripts/db/verify.sh",
-    "db:push": "bash scripts/db/push.sh"
+    "db:push": "bash scripts/db/push.sh",
+    "verify": "npm run typecheck && npm test && npm run db:verify"
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "dependencies": {
+    "@google/genai": "^2.17.1",
+    "@supabase/supabase-js": "^2.112.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3"
+  },
+  "type": "module"
 }

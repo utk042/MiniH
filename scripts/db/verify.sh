@@ -119,6 +119,22 @@ for f in "$REPO_ROOT"/supabase/tests/*.sql; do
   fi
 done
 
+bold "8. TypeScript / SQL parity"
+if command -v node >/dev/null 2>&1 && [ -d "$REPO_ROOT/node_modules/tsx" ]; then
+  parity_sql="$CLUSTER_DIR/parity.sql"
+  (cd "$REPO_ROOT" && node --import tsx scripts/db/parity.ts) > "$parity_sql"
+  if out="$(psql -v ON_ERROR_STOP=1 --quiet --no-psqlrc -X -t -A -d "$DB_NAME" -f "$parity_sql" 2>&1 | sed '/^$/d')"; then
+    printf '   \033[32mpass\033[0m  key derivation matches in both languages  (%s assertions)\n' \
+      "$(printf '%s\n' "$out" | grep -c 'NOTICE:  ok' || true)"
+  else
+    printf '   \033[31mFAIL\033[0m  key derivation differs between TypeScript and SQL\n'
+    printf '%s\n' "$out" | grep -E 'ERROR' | head -10 | sed 's/^/         /'
+    failures=$((failures + 1))
+  fi
+else
+  printf '   \033[33mskip\033[0m  node/tsx not installed; run npm install to check parity\n'
+fi
+
 echo
 if [ "$failures" -gt 0 ]; then
   fail "$failures test file(s) failed."
