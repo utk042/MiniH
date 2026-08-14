@@ -18,17 +18,21 @@ It finds three things, in this order:
 
 ## Status
 
-**Steps 1 and 2 of 5 are complete.** Step 1: schema, RLS, matching functions and
-seed data. Step 2: the canonicalization pipeline — Gemini, cache, Zod, and a
-rules-based fallback. Nothing below is a mock; every function, policy and
-prompt described here runs.
+**Steps 1, 2 and 4 of 5 are complete.** Step 1: schema, RLS, matching functions
+and seed data. Step 2: the canonicalization pipeline — Gemini, cache, Zod, and a
+rules-based fallback. Step 4: the UI — sign-in, browse, shelf, wants, matches,
+and the cycle diagram. Nothing here is a mock; every page reads through
+`lib/data/` and RLS, every mutation goes through `app/actions/` and the
+canonicalization pipeline.
 
-Still to build, in order: the UI, then realtime and messaging. The 60-second
-demo script belongs with the UI and is not written yet — there is no interface
-to click through.
+Still to build: realtime (step 5 — a new listing lighting up existing matches
+live, in the browser, without a refresh; the trigger that recomputes matches on
+the database side already exists, from step 4). Messaging exists today as a
+plain per-match thread with no live delivery yet. The 60-second demo script
+belongs with the finished realtime layer and is not written yet.
 
 ```
-npm run verify        # typecheck, then the TypeScript tests, then the database
+npm run verify        # typecheck, TypeScript tests, database, next build
 ```
 
 ```
@@ -37,19 +41,30 @@ npm run verify        # typecheck, then the TypeScript tests, then the database
 
    pass  01_campus_domain_and_signup.sql  (14 assertions)
    pass  02_rls.sql  (32 assertions)
-   pass  03_cycles.sql  (30 assertions)
+   pass  03_cycles.sql  (34 assertions)
    pass  04_cash_fallback_and_pricing.sql  (17 assertions)
-   pass  05_new_listing_creates_a_match.sql  (12 assertions)
+   pass  05_new_listing_creates_a_match.sql  (13 assertions)
    pass  06_catalogue_resolution.sql  (22 assertions)
    pass  key derivation matches in both languages  (100 assertions)
+
+Route (app)
+┌ ○ /                    ○ /matches          ƒ /sign-in
+├ ƒ /auth/callback        ƒ /matches/[id]     ○ /wants
+├ ○ /browse               ○ /shelf
+└ ƒ /browse/[id]
 ```
 
-**One thing these numbers do not cover:** no call has been made to the real
-Gemini API. There is no key in this environment. The tests drive the pipeline
-through an injected transport, which exercises our validation, derivation,
-caching and fallback but says nothing about how well the model itself resolves
-"orgo 3rd ed morrison boyd". `npm run canon` is the script that answers that,
-and it needs `GEMINI_API_KEY`.
+**Two things these numbers do not cover.** No call has been made to the real
+Gemini API — there is no key in this environment; `npm run canon -- "..."`
+exercises that half. And no page has been driven by a real signed-in session —
+there is no live Supabase project here, so GoTrue and PostgREST are
+unreachable. What *was* checked against a running `next dev`: every
+unauthenticated redirect, the sign-in page's honest "no database configured"
+notice, the 404 and error boundaries, and — because a screenshot is the only
+way to actually see an SVG — the cycle diagram and the list-detail shell,
+rendered with fixture data on a throwaway route that was deleted afterward.
+That check caught a real bug: see the `CycleView` note under **The cycle
+view**, below.
 
 ## Running the verification
 
@@ -273,6 +288,71 @@ npm run canon                             # no key: everything takes the rules p
 
 ---
 
+## The UI
+
+Next.js App Router, no service-role key anywhere in the app — every page and
+every mutation runs under the signed-in student's own Supabase session,
+authenticated via `@supabase/ssr`, scoped by the RLS policies from step 1.
+`proxy.ts` (Next 16's replacement for `middleware.ts`) refreshes that session on
+every request; auth gating itself happens per-page, in `requireProfile()`.
+
+| Route | What it is |
+| --- | --- |
+| `/sign-in` | Magic link. Checks the campus domain client-side for a fast, kind failure — the trigger from step 1 is what actually enforces it. |
+| `/browse`, `/browse/[copyId]` | List-detail index of every open copy, alphabetical by title. CSS-only mobile drill-in: both panes stay in the DOM, a media query hides one or the other. |
+| `/shelf` | Your copies, and the two-step listing flow. |
+| `/wants` | Your wants — private, per step 1's RLS — and the same two-step flow, without enrichment (a want has no description to write). |
+| `/matches`, `/matches/[matchId]` | Swap cycles with the diagram, a plain-language leg-by-leg breakdown, accept/decline/complete, and a message thread. Cash fallback offers list below, unclickable — there is no match row for a cash trade to attach to. |
+
+### The two-step listing flow
+
+Both `/shelf` and `/wants` work the same way, because canonicalization is a
+network call and a review step, not a single form submit:
+
+1. The student types free text. A server action (`resolveListingDraft` /
+   `resolveWantDraft`) runs it through `canonicalize()` (and, for a listing,
+   `enrich()`) and returns a structured draft.
+2. The draft renders as an editable review card — title, tags, description,
+   condition, price — with an `ai-badge` showing where it came from ("resolved
+   by AI", "resolved without the model", "seen before, resolved instantly") and
+   any warnings from the pipeline.
+3. The student edits what's wrong and submits. A second server action
+   (`createCopyListing` / `createWant`) writes it. If the title changed, the
+   correction goes through `applyHumanOverride()` first — cached under the same
+   input hash, so the next person who types that string gets the fix for free,
+   not just this one listing.
+
+### The cycle view
+
+`components/CycleView.tsx` is a **server component** — the brief's "animate it
+once on reveal" needs no client JavaScript at all. A CSS keyframe animation on
+a freshly mounted DOM node plays once, automatically, whether that mount came
+from a first page load or a Next.js client-side navigation to a different
+match. No `IntersectionObserver`, no "has it played yet" state, no trigger
+logic to write.
+
+Layout is by hand, not a graph library: 2–4 cards placed on a circle, arrows
+drawn as quadratic béziers bowed away from the ring's centre so a direct
+swap's two opposite arrows separate into a lens shape instead of overlapping.
+
+**This component had a real bug that no amount of re-reading the code would
+have caught**, because it's only visible in a render. A CSS `transform` —
+which the entrance keyframe sets — takes precedence over an SVG
+`transform="translate(x, y)"` *presentation attribute* on the same element.
+Animating the positioned node group directly meant the keyframe's
+`scale(1) translateY(0)` end state silently overwrote each card's position:
+every card collapsed onto the origin, and only the last one painted was
+visible, in the wrong spot. Caught by rendering `CycleView` with fabricated
+data on a throwaway route, screenshotting it with Playwright, and looking —
+the SQL and TypeScript test suites have no opinion on where an SVG rect lands.
+Fixed by splitting each node into an outer group that only positions (an SVG
+attribute, untouched by CSS) and an inner group that only animates
+(`transform-box: fill-box`, so it scales from its own centre rather than the
+whole SVG's). The throwaway route was deleted afterward; the fix and a comment
+explaining why the split matters were not.
+
+---
+
 ## Security
 
 Every table has RLS enabled, scoped `to authenticated`. The shape:
@@ -339,6 +419,18 @@ staged.
 ## Layout
 
 ```
+app/
+  actions/                                     server actions: the only way the client writes
+    auth.ts  listings.ts  wants.ts  matches.ts  messages.ts
+  sign-in/  browse/  shelf/  wants/  matches/   the nine routes
+  auth/callback/route.ts                        magic-link landing
+  layout.tsx  globals.css                       fonts, design tokens, header
+  proxy.ts (repo root)                          session-cookie refresh (Next 16's proxy convention)
+components/
+  CycleView.tsx                                 the cycle diagram — see "The cycle view" above
+  BrowseIndex.tsx  MatchIndex.tsx                list-detail shells for their routes
+  NewCopyForm.tsx  NewWantForm.tsx               the two-step resolve-then-review flow
+  SignInForm.tsx  SendMessageForm.tsx  *Actions.tsx   small client components, one concern each
 lib/
   ai/
     model.ts                                   GEMINI_MODEL and the call limits
@@ -354,7 +446,14 @@ lib/
     schema.ts                                  Zod + responseSchema
     slug.ts                                    key derivation. deterministic, no model
     supabase-repos.ts                          the two ports, against Supabase
+  data/                                        server-only reads: browse, shelf, wants, matches, cash, messages, session
+  supabase/
+    server.ts  client.ts                       the two Supabase clients (request-scoped / browser)
+    session-refresh.ts                         used by proxy.ts
+    types.ts                                   hand-written Database type — see the note at its top
+    env.ts                                     reads NEXT_PUBLIC_* once, in one place
   tags/vocabulary.ts                           the controlled tag list
+  format.ts                                    money, dates, condition labels
 supabase/
   migrations/
     20260814000100_config_and_types.sql        app_config, enums, slugify, condition_score
@@ -364,6 +463,8 @@ supabase/
     20260814000500_matching.sql                edges, cycle search, pricing, materialization
     20260814000600_storage_and_realtime.sql    photo bucket, publication
     20260814000700_catalogue_resolution.sql    resolve_book, title_key, tag vocabulary
+    20260814000800_auto_refresh_matches.sql    the trigger step 5's realtime will subscribe to
+    20260814000900_copy_description.sql        where enrich()'s description is stored
   seed.sql
   config.toml
   local/00_auth_shim.sql                       local verification only
