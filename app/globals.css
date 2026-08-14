@@ -657,6 +657,59 @@ legend {
   fill: var(--ink-muted);
 }
 
+/* One-time reveal. No trigger logic: this plays whenever the SVG lands in
+   fresh DOM, whether from a first load or a client-side route change to a
+   different match — which is exactly "animate once on reveal". */
+@keyframes cycle-node-in {
+  from {
+    opacity: 0;
+    transform: scale(0.85) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes cycle-arrow-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes cycle-draw {
+  from {
+    stroke-dashoffset: 420;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.cycle-svg .cycle-node {
+  opacity: 0;
+  /* Without this, the CSS transform-origin default for SVG is the whole
+     viewport, not this group's own box, and every card would scale in from
+     the diagram's centre rather than from its own position. */
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: cycle-node-in 420ms ease-out forwards;
+}
+
+.cycle-svg .cycle-arrow {
+  opacity: 0;
+  animation: cycle-arrow-in 200ms ease-out forwards;
+}
+
+.cycle-svg .cycle-arrow__path {
+  stroke-dasharray: 420;
+  animation: cycle-draw 620ms ease-out forwards;
+  animation-delay: inherit;
+}
+
 .cycle-legend {
   display: flex;
   flex-direction: column;

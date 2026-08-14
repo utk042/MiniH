@@ -10,7 +10,10 @@ const nextConfig: NextConfig = {
       },
     ],
   },
-  typedRoutes: true,
+  // Off, not on: several redirects carry a genuinely dynamic "return to this
+  // page" path (requireProfile's returnTo, the sign-in "next" param), and
+  // typed routes wants those as literal unions, not runtime strings.
+  typedRoutes: false,
 };
 
 export default nextConfig;
