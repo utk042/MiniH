@@ -1,0 +1,39 @@
+# Supabase CLI configuration. Only the parts BACKSTACK depends on are set;
+# everything else is left at the CLI's defaults.
+project_id = "backstack"
+
+[db]
+port = 54322
+major_version = 15
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000/auth/callback"]
+jwt_expiry = 3600
+enable_signup = true
+
+# Magic link only. The campus domain restriction is enforced by a trigger on
+# auth.users (migration 20260814000300), not by this file.
+[auth.email]
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = true
+
+[storage]
+enabled = true
+file_size_limit = "4MiB"
+
+[realtime]
+enabled = true
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 500

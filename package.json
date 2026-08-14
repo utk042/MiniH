@@ -1,0 +1,14 @@
+{
+  "name": "backstack",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Demand-first, swap-first peer-to-peer textbook exchange for a single campus.",
+  "scripts": {
+    "db:verify": "bash scripts/db/verify.sh",
+    "db:verify:keep": "BACKSTACK_KEEP_CLUSTER=1 bash scripts/db/verify.sh",
+    "db:push": "bash scripts/db/push.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
