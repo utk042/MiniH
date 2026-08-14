@@ -294,23 +294,22 @@ as $$
 declare
   v_written integer := 0;
 begin
-  -- 1. Expire matches whose copies are no longer available.
+  -- 1. Snapshot the current cycle set. A temp table rather than one giant CTE:
+  --    the expiry, the upsert, the leg wipe and the leg rebuild must happen in
+  --    that order, and data-modifying CTEs give no ordering guarantee.
+  create temporary table _cycles on commit drop as
+    select * from public.find_swap_cycles(null, 4, greatest(coalesce(p_limit, 200), 1));
+
+  -- 2. Expire every proposed match that the search no longer reproduces.
+  --    A copy leaving the pool is the common case, but it is not the only
+  --    one: a want being archived, its priority no longer clearing the
+  --    depth cap, or edition_strict flipping back on all remove a cycle
+  --    without touching a single copies row. Checking against the live
+  --    signature set catches all of them, not just the copy-status case.
   update public.matches m
      set status = 'expired'
    where m.status = 'proposed'
-     and exists (
-       select 1
-         from public.match_legs l
-         join public.copies c on c.id = l.copy_id
-        where l.match_id = m.id
-          and c.status <> 'open'
-     );
-
-  -- 2. Snapshot the current cycle set. A temp table rather than one giant CTE:
-  --    the upsert, the leg wipe and the leg rebuild must happen in that order,
-  --    and data-modifying CTEs give no ordering guarantee.
-  create temporary table _cycles on commit drop as
-    select * from public.find_swap_cycles(null, 4, greatest(coalesce(p_limit, 200), 1));
+     and not exists (select 1 from _cycles c where c.signature = m.signature);
 
   -- 3. Upsert the matches themselves.
   create temporary table _upserted on commit drop as

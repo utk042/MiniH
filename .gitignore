@@ -28,3 +28,4 @@ supabase/.env
 .idea/
 .vscode/
 *.swp
+tsconfig.tsbuildinfo

@@ -1,7 +1,9 @@
 -- ---------------------------------------------------------------------------
--- The path a real user takes: sign in, list a book, add a want, and have a
--- trade appear that did not exist a moment earlier. Everything a client can
--- do here is done as `authenticated`.
+-- The path a real user takes: sign in, list a book, and have a trade appear
+-- that did not exist a moment earlier — with no explicit call to
+-- materialize_matches() anywhere in this file. That call is revoked from
+-- `authenticated` (see 000500) precisely because a student should never need
+-- to make it: the copies_refresh_matches trigger (000800) does it for them.
 -- ---------------------------------------------------------------------------
 begin;
 
@@ -11,6 +13,11 @@ select tests.eq(
   0,
   'before: Nia has no swap'
 );
+
+-- Captured before she lists anything, and as postgres (RLS would otherwise
+-- hide every match she is not yet part of).
+create temporary table before_count on commit drop as
+select count(*)::int as n from public.matches;
 
 -- === as Nia, over the API ===================================================
 select tests.login('nia.walsh');
@@ -22,7 +29,9 @@ select tests.eq(
   'the search is callable by a signed-in student'
 );
 
--- She lists the book Omar has been looking for.
+-- She lists the book Omar has been looking for. Nothing else in this file
+-- touches the matches table — whatever happens next, happens because of this
+-- one insert.
 insert into public.copies (owner_id, book_id, condition, notes, ask_price_cents)
 select auth.uid(), b.id, 'good', 'Found it in a box over the summer.', 4800
   from public.books b
@@ -56,15 +65,10 @@ select tests.eq(
   'the cash offer for that want disappears once a swap exists'
 );
 
--- === materialization picks it up ============================================
-create temporary table before_count on commit drop as
-select count(*)::int as n from public.matches;
-
-select public.materialize_matches(500);
-
+-- === the trigger already materialized it, unprompted ========================
 select tests.ok(
   (select count(*)::int from public.matches) > (select n from before_count),
-  'refreshing the match table records the new trade'
+  'listing the book alone — with no materialize_matches() call in this file — recorded the new trade'
 );
 
 create temporary table new_match on commit drop as
@@ -77,6 +81,16 @@ select m.id
                 where l.match_id = m.id and l.giver_id = tests.uid('omar.diallo'));
 
 select tests.eq((select count(*)::int from new_match), 1, 'the new trade is in the match table exactly once');
+
+-- A student cannot call materialize_matches() themselves (000500 revokes it),
+-- so the only way to prove the trigger already reached a fixed point is to
+-- run it again as postgres and confirm nothing changes.
+select public.materialize_matches(500);
+select tests.eq(
+  (select count(*)::int from public.matches),
+  (select n from before_count) + 1,
+  're-running materialization by hand adds nothing further'
+);
 
 grant select on new_match to authenticated;
 

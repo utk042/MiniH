@@ -209,10 +209,13 @@ select tests.eq(
   'the seed materialized every live cycle'
 );
 
+-- Every match ever written keeps its legs, whatever its status becomes
+-- afterward — an expired match's legs are frozen at its last live shape, not
+-- deleted, so this holds across the whole table, not just 'proposed' rows.
 select tests.eq(
   (select count(*)::int from public.match_legs),
-  (select sum(leg_count)::int from public.matches where status = 'proposed'),
-  'every materialized match has exactly its legs'
+  (select sum(leg_count)::int from public.matches),
+  'every match has exactly its legs, whatever its status'
 );
 
 create temporary table before_rerun on commit drop as
@@ -279,6 +282,50 @@ select tests.eq(
   (select status::text from public.matches where id = (select id from ada_three_way)),
   'proposed',
   'relisting revives the same match row rather than making a new one'
+);
+
+-- === a want disappearing expires its trade too, not just a copy ============
+-- Regression: materialize_matches() used to expire a 'proposed' match only
+-- when one of its copies stopped being open. A cycle can just as easily stop
+-- existing because a WANT changed — archived, or an edition_strict flip that
+-- removes the edge — with no copy involved at all. Before the fix, a match
+-- like that stayed 'proposed' forever, and its legs were the ones left
+-- dangling in the 'every match has exactly its legs' check above.
+create temporary table hana_ike_swap on commit drop as
+select m.id
+  from public.matches m
+ where m.leg_count = 2
+   and exists (select 1 from public.match_legs l
+                where l.match_id = m.id and l.giver_id = tests.uid('hana.suzuki'))
+   and exists (select 1 from public.match_legs l
+                where l.match_id = m.id and l.giver_id = tests.uid('ike.brennan'));
+
+select tests.eq((select count(*)::int from hana_ike_swap), 1, 'the staged direct swap is in the match table');
+
+update public.wants set status = 'archived'
+ where user_id = tests.uid('ike.brennan')
+   and canonical_key = 'rudin-principles-of-mathematical-analysis-3';
+
+select tests.eq(
+  (select status::text from public.matches where id = (select id from hana_ike_swap)),
+  'expired',
+  'archiving the want alone — no copy touched — expires the match, via the wants trigger'
+);
+
+select tests.eq(
+  (select leg_count::int from public.matches where id = (select id from hana_ike_swap)),
+  (select count(*)::int from public.match_legs where match_id = (select id from hana_ike_swap)),
+  'the expired match keeps its legs rather than losing them'
+);
+
+update public.wants set status = 'active'
+ where user_id = tests.uid('ike.brennan')
+   and canonical_key = 'rudin-principles-of-mathematical-analysis-3';
+
+select tests.eq(
+  (select status::text from public.matches where id = (select id from hana_ike_swap)),
+  'proposed',
+  'reactivating the want revives the same match row'
 );
 
 rollback;
